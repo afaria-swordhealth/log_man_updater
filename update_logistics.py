@@ -320,6 +320,172 @@ def save_with_conflict_check(wb, excel_path, mtime_before):
     return True
 
 
+# ── Core update logic ─────────────────────────────────────────────────────────
+
+def update_sheet(ws, invoice_no, invoice_date, shipments):
+    """
+    Apply invoice data from *shipments* to an already-loaded worksheet *ws*.
+
+    Parameters
+    ----------
+    ws           : openpyxl Worksheet (already open, caller saves)
+    invoice_no   : str   e.g. 'FT V/424543'
+    invoice_date : datetime
+    shipments    : dict  { tracking_number_str: amount_float }
+
+    Returns
+    -------
+    (filled, inserted, created) : tuple[int, int, int]
+        Number of rows filled in place, inserted below, and appended at end.
+    """
+
+    # Ensure max_col covers at least up to the last column we write to (COL_W)
+    max_col = max(ws.max_column, COL_W)
+
+    # Identify the last row that contains real data by scanning column A
+    # downwards. This ignores stray values in other columns (e.g. orphaned
+    # formula results) that can inflate ws.max_row far beyond the actual data.
+    last_data_row = 1
+    for r in range(ws.max_row, 1, -1):
+        if ws.cell(row=r, column=1).value is not None:
+            last_data_row = r
+            break
+
+    # Build a lookup table: normalised tracking number → row index.
+    # IMPORTANT: scan the full sheet (not just up to last_data_row) because
+    # rows appended by a previous run only have columns R/U/V/W filled —
+    # column A is empty, so last_data_row stops before them. Without this
+    # extended scan those rows would never be found and would be re-appended
+    # on every subsequent run.
+    existing_rows = {}
+    for r in range(2, ws.max_row + 1):
+        val = ws.cell(row=r, column=COL_R).value
+        if val and str(val).strip() not in ("(Tracking link)", ""):
+            existing_rows[normalize_tracking(val)] = r
+
+    # ── Classify each shipment ────────────────────────────────────────────────
+
+    # Group A: tracking exists in the sheet, column U is empty
+    #          → fill U / V / W in place and remove any red formatting
+    to_fill = []
+
+    # Group B: tracking exists in the sheet, column U is already filled
+    #          → the shipment spans multiple invoices; insert a new row below
+    to_insert = []
+
+    # Group C: tracking not found in the sheet at all
+    #          → append a new row at the bottom of the data
+    to_create = []
+
+    for tracking, amount in shipments.items():
+        key = normalize_tracking(tracking)
+        if key in existing_rows:
+            row_idx = existing_rows[key]
+            existing_invoice = ws.cell(row=row_idx, column=COL_U).value
+
+            if not existing_invoice:
+                # Column U is empty — fill in place
+                to_fill.append((tracking, amount, row_idx))
+
+            elif str(existing_invoice).strip() == invoice_no.strip():
+                # This exact invoice is already recorded for this tracking number.
+                # Running the script twice must be safe — skip silently.
+                pass
+
+            else:
+                # A different invoice exists — this shipment spans multiple invoices.
+                # Insert a new row immediately below the existing entry.
+                to_insert.append((tracking, amount, row_idx))
+        else:
+            to_create.append((tracking, amount))
+
+    # ── Apply changes ─────────────────────────────────────────────────────────
+
+    # ── Group A: fill in place ────────────────────────────────────────────────
+    # Simple cell writes with no structural changes — fast.
+    for tracking, amount, row_idx in to_fill:
+        ws.cell(row=row_idx, column=COL_U, value=invoice_no)
+        ws.cell(row=row_idx, column=COL_V, value=invoice_date)
+        ws.cell(row=row_idx, column=COL_V).number_format = "DD-MM-YYYY"
+        ws.cell(row=row_idx, column=COL_W, value=amount)
+        ws.cell(row=row_idx, column=COL_W).number_format = "\u20ac#,##0.00"
+        # Convert any red-coloured cells in U / V / W to black.
+        # Column R is intentionally excluded — its formatting is not touched.
+        for col in (COL_U, COL_V, COL_W):
+            cell = ws.cell(row=row_idx, column=col)
+            if cell_is_red(cell):
+                cell.font = make_black_font(cell)
+
+    # ── Pre-compute last occupied row (used by both Group B and Group C) ────────
+    # existing_rows was built by scanning the full worksheet (ws.max_row), so
+    # it includes rows appended by previous runs that only have COL_R filled
+    # (col A empty → invisible to last_data_row).  This is the true boundary.
+    last_occupied_row = max(existing_rows.values()) if existing_rows else last_data_row
+
+    # ── Group B: insert rows below existing entries ───────────────────────────
+    # Strategy: read the entire data range into memory (including any appended
+    # rows beyond last_data_row), rebuild the row list with the insertions in
+    # the correct positions, clear the affected area, then write everything
+    # back in a single pass.  Appended rows are included in the snapshot so
+    # that the clear + rewrite does not accidentally destroy them.
+    if to_insert:
+        # Build a mapping: source_row_index → list of (tracking, amount) to
+        # insert immediately below that row.  Using a list supports the edge
+        # case where the same tracking number appears in multiple invoices and
+        # both are processed in the same run.
+        insert_after: dict[int, list] = {}
+        for tracking, amount, row_idx in to_insert:
+            insert_after.setdefault(row_idx, []).append((tracking, amount))
+
+        # Read main data rows (col A present) plus any appended rows beyond.
+        rows_snapshot = [capture_row(ws, r, max_col) for r in range(1, last_data_row + 1)]
+        # Rows beyond last_data_row: col A empty, only COL_R (and maybe U/V/W) filled.
+        # Capture them so they survive the clear-and-rewrite below.
+        appended_snapshot = [
+            capture_row(ws, r, max_col)
+            for r in range(last_data_row + 1, last_occupied_row + 1)
+            if ws.cell(row=r, column=COL_R).value is not None
+        ]
+
+        # Reconstruct the row list, inserting new rows where required, then
+        # append the previously-appended rows at the end (they shift up by
+        # len(to_insert) to make room for the newly inserted rows).
+        rebuilt_rows = []
+        for i, row in enumerate(rows_snapshot):
+            rebuilt_rows.append(row)
+            original_row_num = i + 1
+            for tracking, amount in insert_after.get(original_row_num, []):
+                rebuilt_rows.append(
+                    build_inserted_row(row, tracking, invoice_no, invoice_date, amount, max_col)
+                )
+        rebuilt_rows.extend(appended_snapshot)
+
+        # Clear the entire area that will be rewritten (value + formatting).
+        total_rows = len(rebuilt_rows)
+        for r in range(1, total_rows + 1):
+            for c in range(1, max_col + 1):
+                clear_cell(ws.cell(row=r, column=c))
+
+        for i, row in enumerate(rebuilt_rows):
+            write_row(ws, i + 1, row)
+
+    # ── Group C: append new rows at the end of the data ──────────────────────
+    # After Group B, appended rows have been shifted up by len(to_insert).
+    # new_last_row accounts for both the main data range and any appended rows.
+    new_last_row = last_occupied_row + len(to_insert)
+    next_row     = new_last_row + 1
+    for tracking, amount in to_create:
+        ws.cell(row=next_row, column=COL_R, value=tracking)
+        ws.cell(row=next_row, column=COL_U, value=invoice_no)
+        ws.cell(row=next_row, column=COL_V, value=invoice_date)
+        ws.cell(row=next_row, column=COL_V).number_format = "DD-MM-YYYY"
+        ws.cell(row=next_row, column=COL_W, value=amount)
+        ws.cell(row=next_row, column=COL_W).number_format = "\u20ac#,##0.00"
+        next_row += 1
+
+    return len(to_fill), len(to_insert), len(to_create)
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -359,167 +525,25 @@ def main():
     wb = load_workbook(EXCEL_PATH)
     ws = wb[SHEET_NAME]
 
-    # Ensure max_col covers at least up to the last column we write to (COL_W)
-    max_col = max(ws.max_column, COL_W)
+    print(f"      Last data row  : (computed in update_sheet)")
 
-    # Identify the last row that contains real data by scanning column A
-    # downwards. This ignores stray values in other columns (e.g. orphaned
-    # formula results) that can inflate ws.max_row far beyond the actual data.
-    last_data_row = 1
-    for r in range(ws.max_row, 1, -1):
-        if ws.cell(row=r, column=1).value is not None:
-            last_data_row = r
-            break
-
-    print(f"      Last data row  : {last_data_row}")
-
-    # Build a lookup table: normalised tracking number → row index.
-    # IMPORTANT: scan the full sheet (not just up to last_data_row) because
-    # rows appended by a previous run only have columns R/U/V/W filled —
-    # column A is empty, so last_data_row stops before them. Without this
-    # extended scan those rows would never be found and would be re-appended
-    # on every subsequent run.
-    existing_rows = {}
-    for r in range(2, ws.max_row + 1):
-        val = ws.cell(row=r, column=COL_R).value
-        if val and str(val).strip() not in ("(Tracking link)", ""):
-            existing_rows[normalize_tracking(val)] = r
-
-    print(f"      Tracked entries: {len(existing_rows)}")
-
-    # ── Step 3: Classify each PDF shipment ───────────────────────────────────
+    # ── Steps 3 & 4: Classify and apply ──────────────────────────────────────
     print(f"\n[3/4] Classifying shipments...")
-
-    # Group A: tracking exists in the sheet, column U is empty
-    #          → fill U / V / W in place and remove any red formatting
-    to_fill = []
-
-    # Group B: tracking exists in the sheet, column U is already filled
-    #          → the shipment spans multiple invoices; insert a new row below
-    to_insert = []
-
-    # Group C: tracking not found in the sheet at all
-    #          → append a new row at the bottom of the data
-    to_create = []
-
-    for tracking, amount in shipments.items():
-        key = normalize_tracking(tracking)
-        if key in existing_rows:
-            row_idx = existing_rows[key]
-            existing_invoice = ws.cell(row=row_idx, column=COL_U).value
-
-            if not existing_invoice:
-                # Column U is empty — fill in place
-                to_fill.append((tracking, amount, row_idx))
-
-            elif str(existing_invoice).strip() == invoice_no.strip():
-                # This exact invoice is already recorded for this tracking number.
-                # Running the script twice must be safe — skip silently.
-                print(f"      Skipping {tracking} — {invoice_no} already recorded.")
-
-            else:
-                # A different invoice exists — this shipment spans multiple invoices.
-                # Insert a new row immediately below the existing entry.
-                to_insert.append((tracking, amount, row_idx))
-        else:
-            to_create.append((tracking, amount))
-
-    print(f"      Fill in place  : {len(to_fill)}")
-    print(f"      Insert below   : {len(to_insert)}")
-    print(f"      Append at end  : {len(to_create)}")
-
-    # ── Step 4: Apply changes ─────────────────────────────────────────────────
     print(f"\n[4/4] Applying changes...")
+    filled, inserted, created = update_sheet(ws, invoice_no, invoice_date, shipments)
 
-    # ── Group A: fill in place ────────────────────────────────────────────────
-    # Simple cell writes with no structural changes — fast.
-    for tracking, amount, row_idx in to_fill:
-        ws.cell(row=row_idx, column=COL_U, value=invoice_no)
-        ws.cell(row=row_idx, column=COL_V, value=invoice_date)
-        ws.cell(row=row_idx, column=COL_W, value=amount)
-        # Convert any red-coloured cells in U / V / W to black.
-        # Column R is intentionally excluded — its formatting is not touched.
-        for col in (COL_U, COL_V, COL_W):
-            cell = ws.cell(row=row_idx, column=col)
-            if cell_is_red(cell):
-                cell.font = make_black_font(cell)
-
-    # ── Pre-compute last occupied row (used by both Group B and Group C) ────────
-    # existing_rows was built by scanning the full worksheet (ws.max_row), so
-    # it includes rows appended by previous runs that only have COL_R filled
-    # (col A empty → invisible to last_data_row).  This is the true boundary.
-    last_occupied_row = max(existing_rows.values()) if existing_rows else last_data_row
-
-    # ── Group B: insert rows below existing entries ───────────────────────────
-    # Strategy: read the entire data range into memory (including any appended
-    # rows beyond last_data_row), rebuild the row list with the insertions in
-    # the correct positions, clear the affected area, then write everything
-    # back in a single pass.  Appended rows are included in the snapshot so
-    # that the clear + rewrite does not accidentally destroy them.
-    if to_insert:
-        # Build a mapping: source_row_index → list of (tracking, amount) to
-        # insert immediately below that row.  Using a list supports the edge
-        # case where the same tracking number appears in multiple invoices and
-        # both are processed in the same run.
-        insert_after: dict[int, list] = {}
-        for tracking, amount, row_idx in to_insert:
-            insert_after.setdefault(row_idx, []).append((tracking, amount))
-
-        # Read main data rows (col A present) plus any appended rows beyond.
-        print(f"      Reading {last_occupied_row} rows into memory...")
-        rows_snapshot = [capture_row(ws, r, max_col) for r in range(1, last_data_row + 1)]
-        # Rows beyond last_data_row: col A empty, only COL_R (and maybe U/V/W) filled.
-        # Capture them so they survive the clear-and-rewrite below.
-        appended_snapshot = [
-            capture_row(ws, r, max_col)
-            for r in range(last_data_row + 1, last_occupied_row + 1)
-            if ws.cell(row=r, column=COL_R).value is not None
-        ]
-
-        # Reconstruct the row list, inserting new rows where required, then
-        # append the previously-appended rows at the end (they shift up by
-        # len(to_insert) to make room for the newly inserted rows).
-        print(f"      Rebuilding row structure ({len(to_insert)} insertion(s))...")
-        rebuilt_rows = []
-        for i, row in enumerate(rows_snapshot):
-            rebuilt_rows.append(row)
-            original_row_num = i + 1
-            for tracking, amount in insert_after.get(original_row_num, []):
-                rebuilt_rows.append(
-                    build_inserted_row(row, tracking, invoice_no, invoice_date, amount, max_col)
-                )
-        rebuilt_rows.extend(appended_snapshot)
-
-        # Clear the entire area that will be rewritten (value + formatting).
-        total_rows = len(rebuilt_rows)
-        print(f"      Writing {total_rows} rows back to sheet...")
-        for r in range(1, total_rows + 1):
-            for c in range(1, max_col + 1):
-                clear_cell(ws.cell(row=r, column=c))
-
-        for i, row in enumerate(rebuilt_rows):
-            write_row(ws, i + 1, row)
-
-    # ── Group C: append new rows at the end of the data ──────────────────────
-    # After Group B, appended rows have been shifted up by len(to_insert).
-    # new_last_row accounts for both the main data range and any appended rows.
-    new_last_row = last_occupied_row + len(to_insert)
-    next_row     = new_last_row + 1
-    for tracking, amount in to_create:
-        ws.cell(row=next_row, column=COL_R, value=tracking)
-        ws.cell(row=next_row, column=COL_U, value=invoice_no)
-        ws.cell(row=next_row, column=COL_V, value=invoice_date)
-        ws.cell(row=next_row, column=COL_W, value=amount)
-        next_row += 1
+    print(f"      Fill in place  : {filled}")
+    print(f"      Insert below   : {inserted}")
+    print(f"      Append at end  : {created}")
 
     # ── Save with conflict detection ──────────────────────────────────────────
     saved = save_with_conflict_check(wb, EXCEL_PATH, mtime_before)
 
     if saved:
         print(f"\n  Done.")
-        print(f"  Filled in place : {len(to_fill)}")
-        print(f"  Inserted below  : {len(to_insert)}")
-        print(f"  Appended at end : {len(to_create)}")
+        print(f"  Filled in place : {filled}")
+        print(f"  Inserted below  : {inserted}")
+        print(f"  Appended at end : {created}")
         print(f"\n  Google Drive will sync the updated file automatically.")
 
 
