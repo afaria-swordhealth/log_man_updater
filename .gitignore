@@ -26,7 +26,10 @@ env/
 desktop.ini
 Thumbs.db
 
-# Project-specific
+# Project-specific — invoices and workbooks (data, not code)
 invoices/*.pdf
 *.xlsx
 CONFLICT_BACKUP_*.xlsx
+
+# Keep APP folder structure in git
+!APP/
