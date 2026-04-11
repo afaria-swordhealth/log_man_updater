@@ -444,12 +444,18 @@ def main():
             if cell_is_red(cell):
                 cell.font = make_black_font(cell)
 
+    # ── Pre-compute last occupied row (used by both Group B and Group C) ────────
+    # existing_rows was built by scanning the full worksheet (ws.max_row), so
+    # it includes rows appended by previous runs that only have COL_R filled
+    # (col A empty → invisible to last_data_row).  This is the true boundary.
+    last_occupied_row = max(existing_rows.values()) if existing_rows else last_data_row
+
     # ── Group B: insert rows below existing entries ───────────────────────────
-    # Strategy: rather than calling ws.insert_rows() once per entry (which
-    # shifts all cells below on every call and becomes very slow for large
-    # sheets), we read the entire data range into memory, rebuild the row
-    # list with the insertions in the correct positions, clear the affected
-    # area, then write everything back in a single pass.
+    # Strategy: read the entire data range into memory (including any appended
+    # rows beyond last_data_row), rebuild the row list with the insertions in
+    # the correct positions, clear the affected area, then write everything
+    # back in a single pass.  Appended rows are included in the snapshot so
+    # that the clear + rewrite does not accidentally destroy them.
     if to_insert:
         # Build a mapping: source_row_index → list of (tracking, amount) to
         # insert immediately below that row.  Using a list supports the edge
@@ -459,11 +465,20 @@ def main():
         for tracking, amount, row_idx in to_insert:
             insert_after.setdefault(row_idx, []).append((tracking, amount))
 
-        # Read all rows into memory (value + full style information)
-        print(f"      Reading {last_data_row} rows into memory...")
+        # Read main data rows (col A present) plus any appended rows beyond.
+        print(f"      Reading {last_occupied_row} rows into memory...")
         rows_snapshot = [capture_row(ws, r, max_col) for r in range(1, last_data_row + 1)]
+        # Rows beyond last_data_row: col A empty, only COL_R (and maybe U/V/W) filled.
+        # Capture them so they survive the clear-and-rewrite below.
+        appended_snapshot = [
+            capture_row(ws, r, max_col)
+            for r in range(last_data_row + 1, last_occupied_row + 1)
+            if ws.cell(row=r, column=COL_R).value is not None
+        ]
 
-        # Reconstruct the row list, inserting new rows where required
+        # Reconstruct the row list, inserting new rows where required, then
+        # append the previously-appended rows at the end (they shift up by
+        # len(to_insert) to make room for the newly inserted rows).
         print(f"      Rebuilding row structure ({len(to_insert)} insertion(s))...")
         rebuilt_rows = []
         for i, row in enumerate(rows_snapshot):
@@ -473,11 +488,11 @@ def main():
                 rebuilt_rows.append(
                     build_inserted_row(row, tracking, invoice_no, invoice_date, amount, max_col)
                 )
+        rebuilt_rows.extend(appended_snapshot)
 
-        # Clear the area that will be rewritten (value + formatting)
-        # so no stale data remains if the rebuilt structure is shorter
-        total_rows = last_data_row + len(to_insert)
-        print(f"      Writing {len(rebuilt_rows)} rows back to sheet...")
+        # Clear the entire area that will be rewritten (value + formatting).
+        total_rows = len(rebuilt_rows)
+        print(f"      Writing {total_rows} rows back to sheet...")
         for r in range(1, total_rows + 1):
             for c in range(1, max_col + 1):
                 clear_cell(ws.cell(row=r, column=c))
@@ -486,12 +501,9 @@ def main():
             write_row(ws, i + 1, row)
 
     # ── Group C: append new rows at the end of the data ──────────────────────
-    # Rows appended by previous runs only have COL_R filled (col A is empty),
-    # so last_data_row stops before them. existing_rows was built by scanning
-    # the full worksheet, so max(existing_rows.values()) gives the true last
-    # occupied row — preventing overwrite of tracking numbers awaiting invoice.
-    last_occupied_row = max(existing_rows.values()) if existing_rows else last_data_row
-    new_last_row = max(last_data_row + len(to_insert), last_occupied_row)
+    # After Group B, appended rows have been shifted up by len(to_insert).
+    # new_last_row accounts for both the main data range and any appended rows.
+    new_last_row = last_occupied_row + len(to_insert)
     next_row     = new_last_row + 1
     for tracking, amount in to_create:
         ws.cell(row=next_row, column=COL_R, value=tracking)
