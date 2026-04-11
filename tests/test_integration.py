@@ -391,6 +391,62 @@ class TestBugRegressions:
         finally:
             os.unlink(path)
 
+    def test_no_overwrite_row_with_data_but_no_tracking(self, tmp_path):
+        """
+        Bug 13 regression: rows beyond last_data_row may have real data in
+        cols B-AH even when col R (tracking) is still empty — e.g. export rows
+        that are pre-filled with metadata before the invoice arrives.
+
+        A brand-new Group C append must land AFTER these rows, not on top of them.
+        """
+        import tempfile as _tmp
+        tmp = _tmp.NamedTemporaryFile(suffix=".xlsx", delete=False)
+        tmp.close()
+        path = tmp.name
+
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.title = SHEET_NAME
+        ws.cell(row=1, column=1, value="Header")
+
+        # 3 normal rows (col A + tracking + invoice)
+        for i in range(1, 4):
+            ws.cell(row=i + 1, column=1,      value=f"Row{i}")
+            ws.cell(row=i + 1, column=COL_R,  value=f"1000000{i:03d}")
+            ws.cell(row=i + 1, column=COL_U,  value="FT V/000001")
+            ws.cell(row=i + 1, column=COL_V,  value=datetime(2026, 1, 1))
+            ws.cell(row=i + 1, column=COL_W,  value=10.0)
+
+        # Row 5: export row — col A empty, col R empty, but has metadata
+        # in other columns (mimics real rows 2130-2131)
+        ws.cell(row=5, column=2,   value="Supply Chain & Logistics")  # col B
+        ws.cell(row=5, column=3,   value="Export")                    # col C
+        ws.cell(row=5, column=4,   value="PT - US")                   # col D
+        ws.cell(row=5, column=8,   value="K-Log")                     # col H
+        ws.cell(row=5, column=19,  value="Booked")                    # col S
+
+        wb.save(path)
+        try:
+            new_tracking = "7777777777"
+            ws2, filled, inserted, created = _run(
+                path, shipments={new_tracking: AMOUNT}
+            )
+
+            assert created == 1
+
+            # Row 5 must be untouched — col B still has its original value
+            assert ws2.cell(row=5, column=2).value == "Supply Chain & Logistics", \
+                "Export metadata row (col A empty, col R empty) was overwritten"
+            assert ws2.cell(row=5, column=COL_R).value is None, \
+                "Col R of pre-existing export row was overwritten"
+
+            # New tracking must land at row 6 (after the export metadata row)
+            assert ws2.cell(row=6, column=COL_R).value == new_tracking, \
+                f"New tracking landed at wrong row (expected row 6, got overwrite at row 5)"
+        finally:
+            os.unlink(path)
+
     def test_insert_preserves_appended_rows(self, tmp_path):
         """
         Bug 9 + Group B combined: a Group B insert must not destroy appended rows.

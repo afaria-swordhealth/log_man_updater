@@ -418,10 +418,27 @@ def update_sheet(ws, invoice_no, invoice_date, shipments):
                 cell.font = make_black_font(cell)
 
     # ── Pre-compute last occupied row (used by both Group B and Group C) ────────
-    # existing_rows was built by scanning the full worksheet (ws.max_row), so
-    # it includes rows appended by previous runs that only have COL_R filled
-    # (col A empty → invisible to last_data_row).  This is the true boundary.
-    last_occupied_row = max(existing_rows.values()) if existing_rows else last_data_row
+    # existing_rows only covers rows that have a tracking number in col R.
+    # But some rows (e.g. export rows pre-filled with metadata in cols B-AH)
+    # have real data before their tracking or invoice arrives — if we appended
+    # on top of them we would silently overwrite that data.
+    #
+    # Strategy: start from the furthest row we already know has data (from
+    # existing_rows or last_data_row) and scan forward checking ALL columns
+    # A..max_col.  Stop once we see three consecutive fully-empty rows — this
+    # safely skips any orphan formula cells that inflate ws.max_row far beyond
+    # the real data region.
+    _base = max(existing_rows.values()) if existing_rows else last_data_row
+    last_occupied_row = _base
+    _empty_streak = 0
+    for r in range(_base + 1, ws.max_row + 1):
+        if any(ws.cell(row=r, column=c).value is not None for c in range(1, max_col + 1)):
+            last_occupied_row = r
+            _empty_streak = 0
+        else:
+            _empty_streak += 1
+            if _empty_streak >= 3:
+                break
 
     # ── Group B: insert rows below existing entries ───────────────────────────
     # Strategy: read the entire data range into memory (including any appended
@@ -440,12 +457,14 @@ def update_sheet(ws, invoice_no, invoice_date, shipments):
 
         # Read main data rows (col A present) plus any appended rows beyond.
         rows_snapshot = [capture_row(ws, r, max_col) for r in range(1, last_data_row + 1)]
-        # Rows beyond last_data_row: col A empty, only COL_R (and maybe U/V/W) filled.
-        # Capture them so they survive the clear-and-rewrite below.
+        # Rows beyond last_data_row: col A empty, may have any combination of
+        # cols B-AH filled (tracking, invoice, metadata, or just structural
+        # export-row data before the invoice arrives).  Capture every non-empty
+        # row so they all survive the clear-and-rewrite below.
         appended_snapshot = [
             capture_row(ws, r, max_col)
             for r in range(last_data_row + 1, last_occupied_row + 1)
-            if ws.cell(row=r, column=COL_R).value is not None
+            if any(ws.cell(row=r, column=c).value is not None for c in range(1, max_col + 1))
         ]
 
         # Reconstruct the row list, inserting new rows where required, then
