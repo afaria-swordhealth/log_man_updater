@@ -377,6 +377,7 @@ def update_sheet(ws, invoice_no, invoice_date, shipments):
     #          → append a new row at the bottom of the data
     to_create = []
 
+    skipped = 0
     for tracking, amount in shipments.items():
         key = normalize_tracking(tracking)
         if key in existing_rows:
@@ -390,7 +391,7 @@ def update_sheet(ws, invoice_no, invoice_date, shipments):
             elif str(existing_invoice).strip() == invoice_no.strip():
                 # This exact invoice is already recorded for this tracking number.
                 # Running the script twice must be safe — skip silently.
-                pass
+                skipped += 1
 
             else:
                 # A different invoice exists — this shipment spans multiple invoices.
@@ -483,7 +484,7 @@ def update_sheet(ws, invoice_no, invoice_date, shipments):
         ws.cell(row=next_row, column=COL_W).number_format = "\u20ac#,##0.00"
         next_row += 1
 
-    return len(to_fill), len(to_insert), len(to_create)
+    return len(to_fill), len(to_insert), len(to_create), skipped
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -525,16 +526,17 @@ def main():
     wb = load_workbook(EXCEL_PATH)
     ws = wb[SHEET_NAME]
 
-    print(f"      Last data row  : (computed in update_sheet)")
-
     # ── Steps 3 & 4: Classify and apply ──────────────────────────────────────
     print(f"\n[3/4] Classifying shipments...")
-    print(f"\n[4/4] Applying changes...")
-    filled, inserted, created = update_sheet(ws, invoice_no, invoice_date, shipments)
+    filled, inserted, created, skipped = update_sheet(ws, invoice_no, invoice_date, shipments)
 
     print(f"      Fill in place  : {filled}")
     print(f"      Insert below   : {inserted}")
     print(f"      Append at end  : {created}")
+    if skipped:
+        print(f"      Already done   : {skipped}  ← invoice already recorded, no changes needed")
+
+    print(f"\n[4/4] Applying changes...")
 
     # ── Save with conflict detection ──────────────────────────────────────────
     saved = save_with_conflict_check(wb, EXCEL_PATH, mtime_before)

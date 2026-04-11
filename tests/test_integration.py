@@ -88,7 +88,7 @@ def _run(path, invoice_no=INVOICE_NO, invoice_date=INVOICE_DATE, shipments=None)
 
     wb = load_workbook(path)
     ws = wb[SHEET_NAME]
-    filled, inserted, created = update_sheet(ws, invoice_no, invoice_date, shipments)
+    filled, inserted, created, skipped = update_sheet(ws, invoice_no, invoice_date, shipments)
     wb.save(path)
 
     wb2 = load_workbook(path)

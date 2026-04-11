@@ -46,6 +46,7 @@ def _run(path, shipments):
     wb = load_workbook(path)
     ws = wb[SHEET]
     result = update_sheet(ws, INVOICE_NO, INVOICE_DT, shipments)
+    result = result[:3]  # (filled, inserted, created) — ignore skipped
     wb.save(path)
     wb2 = load_workbook(path)
     return wb2[SHEET], result
