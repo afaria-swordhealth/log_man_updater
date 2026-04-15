@@ -29,3 +29,4 @@ MAC
 PROBLEMAS?
 ----------
 Mac: corre MAC > "diagnose_mac.command" e envia o output completo.
+Windows: envia screenshot do erro.
