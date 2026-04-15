@@ -11,22 +11,22 @@ on:
 
 jobs:
 
-  # Cenário 1: macOS limpo — só Python da Apple, sem python.org
+  # Cenário 1: macOS sem python.org — simula removendo o framework
   clean-mac:
     name: "macOS limpo (sem python.org)"
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verificar que Python do python.org NÃO existe
+      - name: Remover Python do python.org (simular Mac limpo)
         run: |
+          sudo rm -rf /Library/Frameworks/Python.framework
+          echo "Python do python.org removido"
+          # Confirmar que não encontra
           for v in 3.13 3.12 3.11 3.10; do
-            if [ -x "/Library/Frameworks/Python.framework/Versions/$v/bin/python3" ]; then
-              echo "INESPERADO: Python $v do python.org já existe"
-              exit 1
-            fi
+            [ -x "/Library/Frameworks/Python.framework/Versions/$v/bin/python3" ] && { echo "FAIL: ainda existe"; exit 1; }
           done
-          echo "OK: nenhum Python do python.org encontrado"
+          echo "OK: limpo"
 
       - name: Correr install_mac.command (deve pedir Python)
         run: |
@@ -40,6 +40,20 @@ jobs:
       - name: Verificar que .pkg foi descarregado
         run: |
           [ -f /tmp/python-installer.pkg ] && echo "PASS: .pkg descarregado" || { echo "FAIL: .pkg não encontrado"; exit 1; }
+
+      - name: Instalar o .pkg descarregado e re-correr install
+        run: |
+          sudo installer -pkg /tmp/python-installer.pkg -target /
+          chmod +x APP/MAC/install_mac.command
+          # Refrescar o script (o sed anterior alterou-o)
+          git checkout APP/MAC/install_mac.command
+          chmod +x APP/MAC/install_mac.command
+          sed -i '' 's/read -p.*//' APP/MAC/install_mac.command
+          ./APP/MAC/install_mac.command 2>&1
+
+      - name: Verificar instalação completa
+        run: |
+          APP/.venv/bin/python -c "import pdfplumber, openpyxl, tkinter; print('ALL OK')"
 
   # Cenário 2: macOS com Python do python.org — instalação completa
   with-python:
