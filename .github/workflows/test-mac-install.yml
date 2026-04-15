@@ -1,0 +1,109 @@
+name: Test Mac Install
+
+on:
+  push:
+    paths:
+      - 'APP/**'
+  pull_request:
+    paths:
+      - 'APP/**'
+  workflow_dispatch:
+
+jobs:
+
+  # Cenário 1: macOS limpo — só Python da Apple, sem python.org
+  clean-mac:
+    name: "macOS limpo (sem python.org)"
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verificar que Python do python.org NÃO existe
+        run: |
+          for v in 3.13 3.12 3.11 3.10; do
+            if [ -x "/Library/Frameworks/Python.framework/Versions/$v/bin/python3" ]; then
+              echo "INESPERADO: Python $v do python.org já existe"
+              exit 1
+            fi
+          done
+          echo "OK: nenhum Python do python.org encontrado"
+
+      - name: Correr install_mac.command (deve pedir Python)
+        run: |
+          chmod +x APP/MAC/install_mac.command
+          sed -i '' 's/read -p.*/exit 0/' APP/MAC/install_mac.command
+          sed -i '' 's/open "\$PKG"/echo "PKG pronto: \$PKG"/' APP/MAC/install_mac.command
+          OUTPUT=$(./APP/MAC/install_mac.command 2>&1) || true
+          echo "$OUTPUT"
+          echo "$OUTPUT" | grep -q "A descarregar instalador" && echo "PASS: detectou falta de Python" || { echo "FAIL"; exit 1; }
+
+      - name: Verificar que .pkg foi descarregado
+        run: |
+          [ -f /tmp/python-installer.pkg ] && echo "PASS: .pkg descarregado" || { echo "FAIL: .pkg não encontrado"; exit 1; }
+
+  # Cenário 2: macOS com Python do python.org — instalação completa
+  with-python:
+    name: "macOS com Python python.org"
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Instalar Python do python.org
+        run: |
+          curl -L -o /tmp/python.pkg "https://www.python.org/ftp/python/3.12.7/python-3.12.7-macos11.pkg"
+          sudo installer -pkg /tmp/python.pkg -target /
+
+      - name: Verificar Python instalado
+        run: |
+          /Library/Frameworks/Python.framework/Versions/3.12/bin/python3 --version
+
+      - name: Correr install_mac.command
+        run: |
+          chmod +x APP/MAC/install_mac.command
+          sed -i '' 's/read -p.*//' APP/MAC/install_mac.command
+          ./APP/MAC/install_mac.command 2>&1
+
+      - name: Verificar .venv criado na pasta APP
+        run: |
+          [ -x APP/.venv/bin/python ] && echo "PASS: .venv existe" || { echo "FAIL: .venv não criado"; exit 1; }
+
+      - name: Verificar dependências instaladas
+        run: |
+          APP/.venv/bin/python -c "import pdfplumber; print('pdfplumber OK')"
+          APP/.venv/bin/python -c "import openpyxl; print('openpyxl OK')"
+
+      - name: Verificar tkinter funciona
+        run: |
+          APP/.venv/bin/python -c "import tkinter; print('tkinter OK')"
+
+      - name: Verificar import da app (sem GUI)
+        run: |
+          APP/.venv/bin/python -c "
+          import sys, os
+          sys.path.insert(0, 'APP')
+          import update_logistics as core
+          print('update_logistics OK')
+          "
+
+      - name: Testar Open Logistics Updater.command (detecção)
+        run: |
+          chmod +x "APP/MAC/Open Logistics Updater.command"
+          sed -i '' 's/read -p.*//' "APP/MAC/Open Logistics Updater.command"
+          sed -i '' 's|"$VENV_PY" "$SCRIPT"|echo "SCRIPT=$SCRIPT"; echo "VENV=$VENV_PY"|' "APP/MAC/Open Logistics Updater.command"
+          OUTPUT=$("./APP/MAC/Open Logistics Updater.command" 2>&1)
+          echo "$OUTPUT"
+          echo "$OUTPUT" | grep -q "SCRIPT=.*update_logistics_gui.py" && echo "PASS: script encontrado" || { echo "FAIL"; exit 1; }
+          echo "$OUTPUT" | grep -q "VENV=.*.venv/bin/python" && echo "PASS: venv encontrado" || { echo "FAIL"; exit 1; }
+
+  # Cenário 3: diagnóstico corre sem erro
+  diagnose:
+    name: "Diagnóstico corre sem erro"
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Correr diagnose_mac.command
+        run: |
+          chmod +x APP/MAC/diagnose_mac.command
+          sed -i '' 's/read -p.*//' APP/MAC/diagnose_mac.command
+          ./APP/MAC/diagnose_mac.command 2>&1

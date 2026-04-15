@@ -1,23 +1,28 @@
 #!/bin/bash
 # Logistics Invoice Updater — Lançador (Mac)
 
-# Directório deste script → dois níveis acima ficam os .py
-SCRIPT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-SCRIPT="$SCRIPT_DIR/update_logistics_gui.py"
+# Os .py e .venv estão um nível acima (pasta APP)
+PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT="$PROJECT_DIR/update_logistics_gui.py"
+VENV_PY="$PROJECT_DIR/.venv/bin/python"
 
 if [ ! -f "$SCRIPT" ]; then
-    echo "ERRO: Não foi possível encontrar update_logistics_gui.py"
-    echo "Esperado em: $SCRIPT"
+    echo "ERRO: update_logistics_gui.py não encontrado em $PROJECT_DIR"
     read -p "Pressiona Enter para fechar..."
     exit 1
 fi
 
-python3 "$SCRIPT"
+if [ ! -x "$VENV_PY" ]; then
+    echo "ERRO: Ambiente virtual (.venv) não encontrado."
+    echo "Corre 'install_mac.command' primeiro."
+    read -p "Pressiona Enter para fechar..."
+    exit 1
+fi
+
+"$VENV_PY" "$SCRIPT"
 
 if [ $? -ne 0 ]; then
     echo ""
-    echo "ERRO ao iniciar a aplicação."
-    echo "Verifica que Python 3 e dependências estão instalados."
-    echo "Corre 'install_mac.command' se ainda não o fizeste."
+    echo "ERRO ao correr a aplicação."
     read -p "Pressiona Enter para fechar..."
 fi

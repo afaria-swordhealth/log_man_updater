@@ -1,9 +1,15 @@
 @echo off
 title Logistics Invoice Updater
 
-REM Caminho para o script Python (dois níveis acima desta pasta)
-set SCRIPT_DIR=%~dp0..\..
-set SCRIPT=%SCRIPT_DIR%\update_logistics_gui.py
+REM Os .py estão um nível acima (pasta APP)
+set SCRIPT=%~dp0..\update_logistics_gui.py
+
+if not exist "%SCRIPT%" (
+    echo ERRO: update_logistics_gui.py não encontrado.
+    echo Esperado em: %SCRIPT%
+    pause
+    exit /b 1
+)
 
 python "%SCRIPT%"
 

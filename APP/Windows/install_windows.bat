@@ -6,6 +6,9 @@ echo  Logistics Invoice Updater — Instalação
 echo ============================================
 echo.
 
+REM Os .py estão um nível acima (pasta APP)
+set PROJECT_DIR=%~dp0..
+
 REM Verificar se Python está instalado
 python --version >nul 2>&1
 if %errorlevel% neq 0 (
