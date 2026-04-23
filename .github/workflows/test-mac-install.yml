@@ -3,11 +3,11 @@ name: Test Mac Install
 on:
   push:
     paths:
-      - 'APP/**'
+      - 'Log_Man_Updater/**'
       - '.github/workflows/test-mac-install.yml'
   pull_request:
     paths:
-      - 'APP/**'
+      - 'Log_Man_Updater/**'
       - '.github/workflows/test-mac-install.yml'
   workflow_dispatch:
 
@@ -32,10 +32,10 @@ jobs:
 
       - name: Correr install_mac.command (deve pedir Python)
         run: |
-          chmod +x APP/MAC/install_mac.command
-          sed -i '' 's/read -p.*/exit 0/' APP/MAC/install_mac.command
-          sed -i '' 's/open "\$PKG"/echo "PKG pronto: \$PKG"/' APP/MAC/install_mac.command
-          OUTPUT=$(./APP/MAC/install_mac.command 2>&1) || true
+          chmod +x Log_Man_Updater/MAC/install_mac.command
+          sed -i '' 's/read -p.*/exit 0/' Log_Man_Updater/MAC/install_mac.command
+          sed -i '' 's/open "\$PKG"/echo "PKG pronto: \$PKG"/' Log_Man_Updater/MAC/install_mac.command
+          OUTPUT=$(./Log_Man_Updater/MAC/install_mac.command 2>&1) || true
           echo "$OUTPUT"
           echo "$OUTPUT" | grep -q "A descarregar instalador" && echo "PASS: detectou falta de Python" || { echo "FAIL"; exit 1; }
 
@@ -46,16 +46,16 @@ jobs:
       - name: Instalar o .pkg descarregado e re-correr install
         run: |
           sudo installer -pkg /tmp/python-installer.pkg -target /
-          chmod +x APP/MAC/install_mac.command
+          chmod +x Log_Man_Updater/MAC/install_mac.command
           # Refrescar o script (o sed anterior alterou-o)
-          git checkout APP/MAC/install_mac.command
-          chmod +x APP/MAC/install_mac.command
-          sed -i '' 's/read -p.*//' APP/MAC/install_mac.command
-          ./APP/MAC/install_mac.command 2>&1
+          git checkout Log_Man_Updater/MAC/install_mac.command
+          chmod +x Log_Man_Updater/MAC/install_mac.command
+          sed -i '' 's/read -p.*//' Log_Man_Updater/MAC/install_mac.command
+          ./Log_Man_Updater/MAC/install_mac.command 2>&1
 
       - name: Verificar instalação completa
         run: |
-          APP/.venv/bin/python -c "import pdfplumber, openpyxl, tkinter; print('ALL OK')"
+          Log_Man_Updater/.venv/bin/python -c "import pdfplumber, openpyxl, tkinter; print('ALL OK')"
 
   # Cenário 2: macOS com Python do python.org — instalação completa
   with-python:
@@ -75,38 +75,38 @@ jobs:
 
       - name: Correr install_mac.command
         run: |
-          chmod +x APP/MAC/install_mac.command
-          sed -i '' 's/read -p.*//' APP/MAC/install_mac.command
-          ./APP/MAC/install_mac.command 2>&1
+          chmod +x Log_Man_Updater/MAC/install_mac.command
+          sed -i '' 's/read -p.*//' Log_Man_Updater/MAC/install_mac.command
+          ./Log_Man_Updater/MAC/install_mac.command 2>&1
 
-      - name: Verificar .venv criado na pasta APP
+      - name: Verificar .venv criado na pasta Log_Man_Updater
         run: |
-          [ -x APP/.venv/bin/python ] && echo "PASS: .venv existe" || { echo "FAIL: .venv não criado"; exit 1; }
+          [ -x Log_Man_Updater/.venv/bin/python ] && echo "PASS: .venv existe" || { echo "FAIL: .venv não criado"; exit 1; }
 
       - name: Verificar dependências instaladas
         run: |
-          APP/.venv/bin/python -c "import pdfplumber; print('pdfplumber OK')"
-          APP/.venv/bin/python -c "import openpyxl; print('openpyxl OK')"
+          Log_Man_Updater/.venv/bin/python -c "import pdfplumber; print('pdfplumber OK')"
+          Log_Man_Updater/.venv/bin/python -c "import openpyxl; print('openpyxl OK')"
 
       - name: Verificar tkinter funciona
         run: |
-          APP/.venv/bin/python -c "import tkinter; print('tkinter OK')"
+          Log_Man_Updater/.venv/bin/python -c "import tkinter; print('tkinter OK')"
 
       - name: Verificar import da app (sem GUI)
         run: |
-          APP/.venv/bin/python -c "
+          Log_Man_Updater/.venv/bin/python -c "
           import sys, os
-          sys.path.insert(0, 'APP')
+          sys.path.insert(0, 'Log_Man_Updater')
           import update_logistics as core
           print('update_logistics OK')
           "
 
       - name: Testar Open Logistics Updater.command (detecção)
         run: |
-          chmod +x "APP/MAC/Open Logistics Updater.command"
-          sed -i '' 's/read -p.*//' "APP/MAC/Open Logistics Updater.command"
-          sed -i '' 's|"$VENV_PY" "$SCRIPT"|echo "SCRIPT=$SCRIPT"; echo "VENV=$VENV_PY"|' "APP/MAC/Open Logistics Updater.command"
-          OUTPUT=$("./APP/MAC/Open Logistics Updater.command" 2>&1)
+          chmod +x "Log_Man_Updater/MAC/Open Logistics Updater.command"
+          sed -i '' 's/read -p.*//' "Log_Man_Updater/MAC/Open Logistics Updater.command"
+          sed -i '' 's|"$VENV_PY" "$SCRIPT"|echo "SCRIPT=$SCRIPT"; echo "VENV=$VENV_PY"|' "Log_Man_Updater/MAC/Open Logistics Updater.command"
+          OUTPUT=$("./Log_Man_Updater/MAC/Open Logistics Updater.command" 2>&1)
           echo "$OUTPUT"
           echo "$OUTPUT" | grep -q "SCRIPT=.*update_logistics_gui.py" && echo "PASS: script encontrado" || { echo "FAIL"; exit 1; }
           echo "$OUTPUT" | grep -q "VENV=.*.venv/bin/python" && echo "PASS: venv encontrado" || { echo "FAIL"; exit 1; }
@@ -120,6 +120,6 @@ jobs:
 
       - name: Correr diagnose_mac.command
         run: |
-          chmod +x APP/MAC/diagnose_mac.command
-          sed -i '' 's/read -p.*//' APP/MAC/diagnose_mac.command
-          ./APP/MAC/diagnose_mac.command 2>&1
+          chmod +x Log_Man_Updater/MAC/diagnose_mac.command
+          sed -i '' 's/read -p.*//' Log_Man_Updater/MAC/diagnose_mac.command
+          ./Log_Man_Updater/MAC/diagnose_mac.command 2>&1

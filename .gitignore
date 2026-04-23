@@ -31,5 +31,8 @@ invoices/*.pdf
 *.xlsx
 CONFLICT_BACKUP_*.xlsx
 
+# Claude Code
+.claude/
+
 # Keep APP folder structure in git
 !APP/

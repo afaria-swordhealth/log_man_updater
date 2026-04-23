@@ -14,7 +14,7 @@ Example
 
 Dependencies (install once)
 ---------------------------
-    pip install pdfplumber openpyxl
+    pip install -r requirements.txt
 
 Concurrency safety
 ------------------
@@ -29,6 +29,8 @@ result is written alongside it for manual review.
 import sys
 import re
 import os
+import json
+import logging
 import shutil
 from copy import copy
 from datetime import datetime
@@ -41,14 +43,100 @@ from openpyxl.utils import get_column_letter
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
-EXCEL_PATH = r"G:\My Drive\Logistics Management '26.xlsx"
-SHEET_NAME = "LogMan 2026"
+_EXCEL_PATH_DEFAULT = r"G:\My Drive\Logistics Management '26.xlsx"
+_SHEET_NAME_DEFAULT = "LogMan 2026"
+
+
+def _load_config():
+    """Load config.json from the same folder as this script, with fallback to defaults."""
+    cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+    if os.path.exists(cfg_path):
+        with open(cfg_path, encoding="utf-8") as f:
+            cfg = json.load(f)
+        return cfg.get("excel_path", _EXCEL_PATH_DEFAULT), cfg.get("sheet_name", _SHEET_NAME_DEFAULT)
+    return _EXCEL_PATH_DEFAULT, _SHEET_NAME_DEFAULT
+
+
+EXCEL_PATH, SHEET_NAME = _load_config()
 
 # Column indices (1-based) in the target sheet
 COL_R = 18   # Shipping Document / Tracking Number
 COL_U = 21   # Invoice Number
 COL_V = 22   # Invoice Date
 COL_W = 23   # Shipment Amount (EUR)
+
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+
+logger = logging.getLogger("logistics_updater")
+
+
+def _setup_logging():
+    """
+    Configure logging for one run.
+    - File handler: DEBUG level, timestamped, written to logistics_updater.log
+      next to this script (persists across runs for troubleshooting).
+    - Console handler: INFO level, plain text — same output as the old print()
+      calls, compatible with the GUI's stdout redirect.
+    Called at the start of main() so that the GUI's stdout redirect is already
+    in place before the console handler is created.
+    """
+    logger.handlers.clear()
+    logger.setLevel(logging.DEBUG)
+
+    log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logistics_updater.log")
+    fh = logging.FileHandler(log_path, encoding="utf-8")
+    fh.setLevel(logging.DEBUG)
+    fh.setFormatter(logging.Formatter("%(asctime)s  %(levelname)-8s  %(message)s"))
+    logger.addHandler(fh)
+
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setLevel(logging.INFO)
+    ch.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(ch)
+
+
+# ── Pre-flight checks ─────────────────────────────────────────────────────────
+
+def preflight_check(excel_path, sheet_name):
+    """
+    Validate workbook structure before any processing.
+
+    Opens the file read-only so it does not interfere with the main load.
+    Returns a list of error strings; empty list means all checks passed.
+    """
+    errors = []
+
+    if not os.path.exists(excel_path):
+        errors.append(
+            f"Workbook not found: {excel_path}\n"
+            "      Check that Google Drive desktop app is running and synced."
+        )
+        return errors
+
+    try:
+        wb = load_workbook(excel_path, read_only=True, data_only=True)
+    except Exception as e:
+        errors.append(f"Cannot open workbook: {e}")
+        return errors
+
+    if sheet_name not in wb.sheetnames:
+        errors.append(
+            f"Sheet '{sheet_name}' not found. "
+            f"Available: {', '.join(wb.sheetnames)}"
+        )
+        wb.close()
+        return errors
+
+    ws = wb[sheet_name]
+    col_count = ws.max_column or 0
+    if col_count < COL_W:
+        errors.append(
+            f"Sheet has only {col_count} columns — expected at least {COL_W} (column W)."
+        )
+
+    wb.close()
+    return errors
 
 
 # ── Cell utilities ────────────────────────────────────────────────────────────
@@ -343,19 +431,18 @@ def save_with_conflict_check(wb, excel_path, mtime_before):
     """
     mtime_now = get_mtime(excel_path)
     if mtime_now != mtime_before:
-        # The file changed on disk — another save would overwrite those changes.
-        timestamp  = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_dir = os.path.dirname(excel_path)
+        timestamp   = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_dir  = os.path.dirname(excel_path)
         backup_name = f"CONFLICT_BACKUP_{timestamp}.xlsx"
         backup_path = os.path.join(backup_dir, backup_name)
         wb.save(backup_path)
-        print()
-        print("  !! CONFLICT DETECTED !!")
-        print(f"  The file was modified externally while the script was running.")
-        print(f"  To prevent data loss the script did NOT overwrite the file.")
-        print(f"  Your processed changes have been saved to:")
-        print(f"  {backup_path}")
-        print(f"  Please merge the two files manually.")
+        logger.warning("")
+        logger.warning("  !! CONFLICT DETECTED !!")
+        logger.warning("  The file was modified externally while the script was running.")
+        logger.warning("  To prevent data loss the script did NOT overwrite the file.")
+        logger.warning("  Your processed changes have been saved to:")
+        logger.warning("  %s", backup_path)
+        logger.warning("  Please merge the two files manually.")
         return False
 
     wb.save(excel_path)
@@ -456,7 +543,7 @@ def update_sheet(ws, invoice_no, invoice_date, shipments):
         ws.cell(row=row_idx, column=COL_V, value=invoice_date)
         ws.cell(row=row_idx, column=COL_V).number_format = "DD-MM-YYYY"
         ws.cell(row=row_idx, column=COL_W, value=amount)
-        ws.cell(row=row_idx, column=COL_W).number_format = "\u20ac#,##0.00"
+        ws.cell(row=row_idx, column=COL_W).number_format = "€#,##0.00"
         # Convert any red-coloured cells in U / V / W to black.
         # Column R is intentionally excluded — its formatting is not touched.
         for col in (COL_U, COL_V, COL_W):
@@ -549,7 +636,7 @@ def update_sheet(ws, invoice_no, invoice_date, shipments):
         ws.cell(row=next_row, column=COL_V, value=invoice_date)
         ws.cell(row=next_row, column=COL_V).number_format = "DD-MM-YYYY"
         ws.cell(row=next_row, column=COL_W, value=amount)
-        ws.cell(row=next_row, column=COL_W).number_format = "\u20ac#,##0.00"
+        ws.cell(row=next_row, column=COL_W).number_format = "€#,##0.00"
         next_row += 1
 
     return len(to_fill), len(to_insert), len(to_create), skipped
@@ -558,35 +645,41 @@ def update_sheet(ws, invoice_no, invoice_date, shipments):
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    _setup_logging()
+
     if len(sys.argv) < 2:
-        print("Usage: python update_logistics.py <path_to_invoice.pdf>")
+        logger.error("Usage: python update_logistics.py <path_to_invoice.pdf>")
         sys.exit(1)
 
     pdf_path = sys.argv[1]
 
     if not os.path.exists(pdf_path):
-        print(f"ERROR: PDF not found: {pdf_path}")
+        logger.error("PDF not found: %s", pdf_path)
         sys.exit(1)
 
-    if not os.path.exists(EXCEL_PATH):
-        print(f"ERROR: Workbook not found: {EXCEL_PATH}")
-        print("Check that the Google Drive desktop app is running and synced.")
+    # ── Pre-flight: validate workbook before doing any work ───────────────────
+    logger.info("\n[0/4] Pre-flight checks...")
+    errors = preflight_check(EXCEL_PATH, SHEET_NAME)
+    if errors:
+        for e in errors:
+            logger.error("  ERROR: %s", e)
         sys.exit(1)
+    logger.info("      OK")
 
     # ── Step 1: Parse the PDF ─────────────────────────────────────────────────
-    print(f"\n[1/4] Reading PDF...")
+    logger.info("\n[1/4] Reading PDF...")
     invoice_no, invoice_date, shipments = parse_invoice_pdf(pdf_path)
 
     if not invoice_no or not invoice_date or not shipments:
-        print("ERROR: Could not extract invoice data from the PDF.")
+        logger.error("Could not extract invoice data from the PDF.")
         sys.exit(1)
 
-    print(f"      Invoice : {invoice_no}")
-    print(f"      Date    : {invoice_date.strftime('%d-%m-%Y')}")
-    print(f"      Entries : {len(shipments)} shipments")
+    logger.info("      Invoice : %s", invoice_no)
+    logger.info("      Date    : %s", invoice_date.strftime("%d-%m-%Y"))
+    logger.info("      Entries : %d shipments", len(shipments))
 
     # ── Step 2: Load the workbook ─────────────────────────────────────────────
-    print(f"\n[2/4] Loading workbook...")
+    logger.info("\n[2/4] Loading workbook...")
 
     # Record the file timestamp BEFORE loading — used later for conflict detection
     mtime_before = get_mtime(EXCEL_PATH)
@@ -595,30 +688,30 @@ def main():
     ws = wb[SHEET_NAME]
 
     # ── Steps 3 & 4: Classify and apply ──────────────────────────────────────
-    print(f"\n[3/4] Classifying shipments...")
+    logger.info("\n[3/4] Classifying shipments...")
     filled, inserted, created, skipped = update_sheet(ws, invoice_no, invoice_date, shipments)
 
-    print(f"      Fill in place  : {filled}")
-    print(f"      Insert below   : {inserted}")
-    print(f"      Append at end  : {created}")
+    logger.info("      Fill in place  : %d", filled)
+    logger.info("      Insert below   : %d", inserted)
+    logger.info("      Append at end  : %d", created)
     if skipped:
-        print(f"      Already done   : {skipped}  ← invoice already recorded, no changes needed")
+        logger.info("      Already done   : %d  ← invoice already recorded, no changes needed", skipped)
 
-    print(f"\n[4/4] Applying changes...")
+    logger.info("\n[4/4] Applying changes...")
 
     if filled == 0 and inserted == 0 and created == 0:
-        print(f"\n  Nothing to save — invoice already fully recorded.")
+        logger.info("\n  Nothing to save — invoice already fully recorded.")
         return
 
     # ── Save with conflict detection ──────────────────────────────────────────
     saved = save_with_conflict_check(wb, EXCEL_PATH, mtime_before)
 
     if saved:
-        print(f"\n  Done.")
-        print(f"  Filled in place : {filled}")
-        print(f"  Inserted below  : {inserted}")
-        print(f"  Appended at end : {created}")
-        print(f"\n  Google Drive will sync the updated file automatically.")
+        logger.info("\n  Done.")
+        logger.info("  Filled in place : %d", filled)
+        logger.info("  Inserted below  : %d", inserted)
+        logger.info("  Appended at end : %d", created)
+        logger.info("\n  Google Drive will sync the updated file automatically.")
 
 
 if __name__ == "__main__":
